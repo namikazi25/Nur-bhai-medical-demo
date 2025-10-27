@@ -11,62 +11,259 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# MedGemma endpoint
-import requests
-from auth import create_credentials, get_access_token_refresh_if_needed
+# MedGemma Bangla integration using Vertex AI
+import json
 import os
-from cache import cache
+from typing import Any, Dict, List, Optional
 
-_endpoint_url = os.environ.get('GCP_MEDGEMMA_ENDPOINT')
+from google.cloud import aiplatform
+from google.oauth2 import service_account
 
-# Create credentials
-secret_key_json = os.environ.get('GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY')
-medgemma_credentials = create_credentials(secret_key_json)
+from cache import PersistentCache, cache as default_cache
 
-# https://cloud.google.com/vertex-ai/docs/reference/rest/v1beta1/projects.locations.endpoints.chat/completions
-@cache.memoize()
-def medgemma_get_text_response(
-    messages: list,
-    temperature: float = 0.1,
-    max_tokens: int = 4096,
-    stream: bool = False,
-    top_p: float | None = None,
-    seed: int | None = None,
-    stop: list[str] | str | None = None,
-    frequency_penalty: float | None = None,
-    presence_penalty: float | None = None,
-    model: str="tgi"
-):
+GCP_PROJECT = os.environ.get("GCP_PROJECT")
+GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+GCP_MEDGEMMA_ENDPOINT = os.environ.get("GCP_MEDGEMMA_ENDPOINT")
+GCP_SERVICE_ACCOUNT_KEY = os.environ.get("GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY")
+
+_vertex_initialized = False
+_vertex_credentials: Optional[service_account.Credentials] = None
+
+
+def _initialize_vertex_ai() -> None:
+    global _vertex_initialized, _vertex_credentials
+    if _vertex_initialized:
+        return
+
+    if GCP_SERVICE_ACCOUNT_KEY:
+        try:
+            credentials_info = json.loads(GCP_SERVICE_ACCOUNT_KEY)
+            _vertex_credentials = service_account.Credentials.from_service_account_info(credentials_info)
+            aiplatform.init(project=GCP_PROJECT, location=GCP_LOCATION, credentials=_vertex_credentials)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Vertex AI initialization failed: {exc}")
+            _vertex_credentials = None
+            aiplatform.init(project=GCP_PROJECT, location=GCP_LOCATION)
+    else:
+        aiplatform.init(project=GCP_PROJECT, location=GCP_LOCATION)
+
+    _vertex_initialized = True
+
+
+def _build_bangla_system_prompt() -> str:
+    return """আপনি একজন সহায়ক চিকিৎসা সহকারী। আপনার নির্দেশাবলী:
+- বাংলায় স্পষ্ট ও পেশাদার ভঙ্গিতে উত্তর দিন
+- রোগীর উদ্বেগ বোঝার জন্য সহানুভূতিশীলভাবে প্রশ্ন করুন
+- উপসর্গের সময়কাল, তীব্রতা, উদ্দীপক এবং সংশ্লিষ্ট লক্ষণ নিয়ে তথ্য সংগ্রহ করুন
+- প্রয়োজনে চিকিৎসা পরিভাষার ব্যাখ্যা দিন
+- কোনও মেডিকেল সিদ্ধান্ত বা পরামর্শ দিবেন না
+"""
+
+
+def _normalize_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            else:
+                parts.append(json.dumps(item, ensure_ascii=False))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return content.get("text", "")
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
+def _build_messages(
+    prompt: str,
+    conversation_history: List[Dict[str, str]],
+    extra_system_prompts: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
+    messages: List[Dict[str, str]] = [{"role": "system", "content": _build_bangla_system_prompt()}]
+
+    for extra_prompt in extra_system_prompts or []:
+        messages.append({"role": "system", "content": extra_prompt})
+
+    for message in conversation_history:
+        messages.append({"role": message["role"], "content": message["content"]})
+
+    if prompt:
+        messages.append({"role": "user", "content": prompt})
+
+    return messages
+
+
+def generate_medgemma_response(
+    prompt: str,
+    conversation_history: List[Dict[str, str]],
+    cache: Optional[PersistentCache] = None,
+    temperature: float = 0.7,
+    max_tokens: int = 1024,
+    system_prompts: Optional[List[str]] = None,
+) -> str:
     """
-    Makes a chat completion request to the configured LLM API (OpenAI-compatible).
+    Generate a Bangla response from MedGemma with caching.
     """
-    headers = {
-        "Authorization": f"Bearer {get_access_token_refresh_if_needed(medgemma_credentials)}",
-        "Content-Type": "application/json",
+
+    cache = cache or default_cache
+    if not GCP_MEDGEMMA_ENDPOINT:
+        return "MedGemma endpoint is not configured. অনুগ্রহ করে GCP_MEDGEMMA_ENDPOINT সেট করুন।"
+
+    serialized_context = {
+        "prompt": prompt,
+        "history": conversation_history,
+        "system_prompts": system_prompts or [],
     }
 
-    # Based on the openai format
-    payload = {
-                "messages": messages,
-                "max_tokens": max_tokens
-              }
+    conversation_context = json.dumps(
+        serialized_context,
+        ensure_ascii=False,
+    )
 
+    cached_response = cache.get(prompt, context=conversation_context)
+    if cached_response:
+        return cached_response
 
-    if temperature is not None: payload["temperature"] = temperature
-    if top_p is not None: payload["top_p"] = top_p
-    if seed is not None: payload["seed"] = seed
-    if stop is not None: payload["stop"] = stop
-    if frequency_penalty is not None: payload["frequency_penalty"] = frequency_penalty
-    if presence_penalty is not None: payload["presence_penalty"] = presence_penalty
-
-
-    response = requests.post(_endpoint_url, headers=headers, json=payload, stream=stream, timeout=60)
+    _initialize_vertex_ai()
     try:
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.JSONDecodeError:
-        # Log the problematic response for easier debugging in the future.
-        print(f"Error: Failed to decode JSON from MedGemma. Status: {response.status_code}, Response: {response.text}")
-        # Re-raise the exception so the caller knows something went wrong.
-        raise
+        endpoint = aiplatform.Endpoint(GCP_MEDGEMMA_ENDPOINT)
+        messages = _build_messages(prompt, conversation_history, extra_system_prompts=system_prompts)
+        response = endpoint.predict(
+            instances=[
+                {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "language": "bn",
+                }
+            ]
+        )
+        predictions = getattr(response, "predictions", None)
+        if predictions:
+            generated_text = predictions[0].get("content", "")
+            if generated_text:
+                cache.set(prompt, generated_text, context=conversation_context)
+                return generated_text
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"MedGemma API error: {exc}")
+
+    return "দুঃখিত, একটি ত্রুটি ঘটেছে। অনুগ্রহ করে আবার চেষ্টা করুন।"
+
+
+def generate_medical_summary(
+    patient_info: Dict[str, Any],
+    conversation_history: List[Dict[str, str]],
+    cache: Optional[PersistentCache] = None,
+) -> str:
+    """
+    Create a Bangla medical summary from conversation history.
+    """
+
+    conversation_text = "\n".join(
+        f"{'সহায়ক' if msg['role'] == 'assistant' else 'রোগী'}: {msg['content']}"
+        for msg in conversation_history
+    )
+
+    summary_prompt = f"""নিম্নলিখিত রোগীর তথ্য এবং কথোপকথনের উপর ভিত্তি করে বাংলায় একটি বিস্তারিত প্রাক-পরিদর্শন সারাংশ তৈরি করুন।
+
+রোগীর তথ্য:
+- নাম: {patient_info.get('name')}
+- বয়স: {patient_info.get('age')}
+- লিঙ্গ: {patient_info.get('gender')}
+
+কথোপকথন:
+{conversation_text}
+
+সারাংশে নিম্নলিখিত বিভাগ অন্তর্ভুক্ত করুন:
+১. প্রধান অভিযোগ
+২. বর্তমান অসুস্থতার ইতিহাস
+৩. সংশ্লিষ্ট উপসর্গ
+৪. প্রাসঙ্গিক চিকিৎসা ইতিহাস
+৫. সম্ভাব্য ডিফারেনশিয়াল ডায়াগনসিস
+৬. প্রস্তাবিত পরীক্ষা এবং মূল্যায়ন
+"""
+
+    return generate_medgemma_response(
+        prompt=summary_prompt,
+        conversation_history=[],
+        cache=cache,
+        temperature=0.5,
+        max_tokens=2048,
+    )
+
+
+def evaluate_interview_quality(
+    conversation_history: List[Dict[str, str]],
+    reference_diagnosis: str,
+    cache: Optional[PersistentCache] = None,
+) -> str:
+    """
+    Evaluate interview quality in Bangla with MedGemma.
+    """
+
+    conversation_text = "\n".join(
+        f"{'সহায়ক' if msg['role'] == 'assistant' else 'রোগী'}: {msg['content']}"
+        for msg in conversation_history
+    )
+
+    eval_prompt = f"""নিম্নলিখিত চিকিৎসা সাক্ষাৎকার মূল্যায়ন করুন।
+
+রেফারেন্স ডায়াগনসিস: {reference_diagnosis}
+
+কথোপকথন:
+{conversation_text}
+
+নিম্নলিখিত মানদণ্ডের উপর ভিত্তি করে একটি মূল্যায়ন রিপোর্ট প্রদান করুন:
+১. তথ্য সংগ্রহের সম্পূর্ণতা
+২. প্রশ্নের প্রাসঙ্গিকতা এবং মান
+৩. যোগাযোগ দক্ষতা
+৪. সঠিক ডায়াগনসিসের দিকে পথ
+৫. উন্নতির ক্ষেত্র
+
+মূল্যায়ন বাংলায় গঠনমূলক ও বিস্তারিত করুন।"""
+
+    return generate_medgemma_response(
+        prompt=eval_prompt,
+        conversation_history=[],
+        cache=cache,
+        temperature=0.3,
+        max_tokens=2048,
+    )
+
+
+def medgemma_get_text_response(messages: List[Dict[str, Any]], **kwargs: Any) -> str:
+    """
+    Backwards-compatible wrapper that accepts OpenAI-style messages.
+    """
+
+    cache = kwargs.get("cache")
+    temperature = kwargs.get("temperature", 0.7)
+    max_tokens = kwargs.get("max_tokens", 1024)
+
+    system_prompts: List[str] = []
+    conversation_history: List[Dict[str, str]] = []
+
+    for entry in messages:
+        role = entry.get("role")
+        content = _normalize_content(entry.get("content", ""))
+        if role == "system":
+            system_prompts.append(content)
+        elif role in {"assistant", "user"}:
+            conversation_history.append({"role": role, "content": content})
+
+    final_prompt = ""
+    if conversation_history and conversation_history[-1]["role"] == "user":
+        final_prompt = conversation_history.pop()["content"]
+
+    return generate_medgemma_response(
+        prompt=final_prompt,
+        conversation_history=conversation_history,
+        cache=cache,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        system_prompts=system_prompts,
+    )

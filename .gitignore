@@ -1,0 +1,46 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.egg-info/
+
+# Environment variables
+.env
+env.list
+
+# Cache directories
+cache/
+cache_bangla/
+cache_archive.zip
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Compiled assets
+dist/
+build/
+frontend/build/
+frontend/node_modules/
+
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
+
+# Editor settings
+.idea/
+.vscode/
+

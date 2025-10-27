@@ -1,8 +1,26 @@
-flask
-gunicorn
-flask-cors
-requests
-google-auth
-diskcache
-pydub
-google-generativeai>=0.5.0
+# Core dependencies
+flask==3.0.0
+flask-cors==4.0.0
+gunicorn==21.2.0
+
+# Google Cloud and AI
+google-cloud-aiplatform==1.38.0
+google-generativeai==0.3.1
+google-auth==2.25.0
+google-api-core==2.15.0
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
+diskcache==5.6.3
+pydub==0.25.1
+
+# Data handling
+pydantic==2.5.0
+ujson==5.9.0
+
+# Optional but recommended
+certifi==2023.11.17
+charset-normalizer==3.3.2
+idna==3.6
+urllib3==2.1.0

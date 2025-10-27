@@ -1,86 +1,126 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+from typing import Dict
 
-from evaluation import evaluate_report, evaluation_prompt
-from flask import Flask, send_from_directory, request, jsonify, Response, stream_with_context, send_file
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-import os, time, json, re
-from gemini import gemini_get_text_response
-from interview_simulator import stream_interview
-from cache import create_cache_zip
-from medgemma import medgemma_get_text_response
 
-app = Flask(__name__, static_folder=os.environ.get("FRONTEND_BUILD", "frontend/build"), static_url_path="/")
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}})
+from cache import PersistentCache, create_cache_zip
+from interview_simulator import InterviewSimulator
 
-@app.route("/")
-def serve():
-    """Serves the main index.html file."""
-    return send_from_directory(app.static_folder, "index.html")
+import os
 
 
-@app.route("/api/stream_conversation", methods=["GET"])
-def stream_conversation():
-    """Streams the conversation with the interview simulator."""
-    patient = request.args.get("patient", "Patient")
-    condition = request.args.get("condition", "unknown condition")
-    
-    def generate():
-        try:
-            for message in stream_interview(patient, condition):
-                yield f"data: {message}\n\n"
-        except Exception as e:
-            yield f"data: Error: {str(e)}\n\n"
-            raise e
-            
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+app = Flask(__name__, static_folder=os.environ.get("FRONTEND_BUILD", "frontend/build"))
+CORS(app)
 
-@app.route("/api/evaluate_report", methods=["POST"])
-def evaluate_report_call():
-    """Evaluates the provided medical report."""
-    data = request.get_json()
-    report = data.get("report", "")
-    if not report:
-        return jsonify({"error": "Report is required"}), 400
-    condition = data.get("condition", "")
-    if not condition:
-        return jsonify({"error": "Condition is required"}), 400    
-    
-    evaluation_text = evaluate_report(report, condition)
-    
-    return jsonify({"evaluation": evaluation_text})
+cache = PersistentCache(cache_dir=os.environ.get("CACHE_DIR", "cache_bangla"), language="bn")
+sessions: Dict[str, InterviewSimulator] = {}
 
 
-@app.route("/api/download_cache")
-def download_cache_zip():
-    """Creates a zip file of the cache and returns it for download."""
-    zip_filepath, error = create_cache_zip()
+@app.route("/api/start-interview", methods=["POST"])
+def start_interview():
+    try:
+        data = request.get_json() or {}
+        patient_id = data.get("patient_id")
+        patient_data = data.get("patient_data")
+
+        if not patient_id or not patient_data:
+            return jsonify({"error": "Missing required data"}), 400
+
+        simulator = InterviewSimulator(patient_data, cache)
+        sessions[patient_id] = simulator
+
+        response = simulator.start_interview()
+        return jsonify({"success": True, "language": "bn", **response})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/send-message", methods=["POST"])
+def send_message():
+    try:
+        data = request.get_json() or {}
+        patient_id = data.get("patient_id")
+        message = data.get("message")
+
+        if not patient_id or patient_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+
+        simulator = sessions[patient_id]
+        response = simulator.process_user_response(message)
+        return jsonify({"success": True, "language": "bn", **response})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/generate-report", methods=["POST"])
+def generate_report():
+    try:
+        data = request.get_json() or {}
+        patient_id = data.get("patient_id")
+
+        if not patient_id or patient_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+
+        simulator = sessions[patient_id]
+        report = simulator.generate_report()
+        transcript = simulator.get_transcript()
+
+        return jsonify({
+            "success": True,
+            "language": "bn",
+            "report": report,
+            "transcript": transcript,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/get-transcript", methods=["POST"])
+def get_transcript():
+    try:
+        data = request.get_json() or {}
+        patient_id = data.get("patient_id")
+
+        if not patient_id or patient_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+
+        simulator = sessions[patient_id]
+        transcript = simulator.get_transcript()
+
+        return jsonify({"success": True, "language": "bn", "transcript": transcript})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/cache-stats", methods=["GET"])
+def cache_stats():
+    try:
+        stats = cache.get_stats()
+        return jsonify({"success": True, "language": "bn", "stats": stats})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/download-cache", methods=["GET"])
+def download_cache():
+    archive_path, error = create_cache_zip()
     if error:
         return jsonify({"error": error}), 500
-    if not os.path.isfile(zip_filepath):
-        return jsonify({"error": f"File not found: {zip_filepath}"}), 404
-    return send_file(zip_filepath, as_attachment=True)
+    if not archive_path:
+        return jsonify({"error": "Cache archive not available"}), 404
+    return send_from_directory(os.path.dirname(archive_path), os.path.basename(archive_path), as_attachment=True)
 
 
+@app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
-def static_proxy(path):
-    """Serves static files and defaults to index.html for unknown paths."""
-    file_path = os.path.join(app.static_folder, path)
-    if os.path.isfile(file_path):
-        return send_from_directory(app.static_folder, path)
-    else:
-        return send_from_directory(app.static_folder, "index.html")
-        
+def serve(path: str):
+    static_dir = app.static_folder or "frontend/build"
+    target = os.path.join(static_dir, path)
+    if path and os.path.exists(target):
+        return send_from_directory(static_dir, path)
+    return send_from_directory(static_dir, "index.html")
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860, threaded=True)
+    port = int(os.environ.get("PORT", 7860))
+    app.run(host="0.0.0.0", port=port)

@@ -22,7 +22,7 @@ short_description: 'Simulated Pre-visit Intake Demo built using MedGemma'
 
 # AppointReady: Simulated Pre-visit Intake Demo built using MedGemma
 
-Healthcare providers often seek efficient ways to gather comprehensive patient information before appointments. This demo illustrates how MedGemma could be used in an application to streamline pre-visit information collection and utilization. 
+Healthcare providers often seek efficient ways to gather comprehensive patient information before appointments. This demo illustrates how MedGemma could be used in an application to streamline pre-visit information collection and utilization. The current build focuses on a Bangla (bn-BD) experience, from prompts and reports to audio responses.
 
 The demonstration first asks questions to gather pre-visit information.
 After it has identified and collected relevant information, the demo application generates a pre-visit report using both collected and health record information (stored as FHIR resources for this demonstration). This type of intelligent pre-visit report can help providers be more efficient and effective while also providing an improved experience for patients compared to traditional intake forms.
@@ -96,19 +96,24 @@ To run this demo on your own machine, you'll need to have Docker installed.
     cd appoint-ready
     ```
 
-2.  **Configure environment variables:**
+2.  **Configure environment variables (Bangla build):**
     This project uses an `env.list` file for configuration, which is passed to Docker. Create this file in the root directory.
     ```ini
     # env.list
-    GEMINI_API_KEY="your-gemini-token"
-    GENERATE_SPEECH=false or true
-    GCP_MEDGEMMA_ENDPOINT=medgemma vertex ai endpoint 
-    GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY="service-account-key json"  
+    GEMINI_API_KEY="your-gemini-api-key"
+    GCP_PROJECT="your-gcp-project-id"
+    GCP_LOCATION="us-central1"
+    GCP_MEDGEMMA_ENDPOINT="https://vertexai.googleapis.com/v1/projects/.../locations/.../publishers/google/models/..."
+    GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY='{"type":"service_account","project_id":"..."}'
+    GENERATE_SPEECH=true
     ```
 
-    GEMINI_API_KEY: Key can be generated via [aistudio](https://aistudio.google.com/apikey).
-    GENERATE_SPEECH: Should the demo generate speech not found in cache. Default is false.
-    GCP_MEDGEMMA_ENDPOINT: Deploy MedGemma via [Model Garden](https://console.cloud.google.com/vertex-ai/publishers/google/model-garden/medgemma).
+    * `GEMINI_API_KEY`: Obtain from [Google AI Studio](https://aistudio.google.com/apikey).
+    * `GCP_PROJECT`: Google Cloud project that hosts the deployed MedGemma endpoint.
+    * `GCP_LOCATION`: Region where MedGemma is deployed (for example `us-central1`).
+    * `GCP_MEDGEMMA_ENDPOINT`: Full Vertex AI endpoint URI for the MedGemma deployment.
+    * `GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY`: JSON service-account credentials with access to the endpoint.
+    * `GENERATE_SPEECH`: Set to `true` to enable Gemini TTS generation (defaults to `false` if omitted). When `false`, cached audio is served if present and new clips are skipped.
 
 ### Execution
 1.  **Build and run the Docker containers:**
@@ -118,6 +123,43 @@ To run this demo on your own machine, you'll need to have Docker installed.
 
 2.  **Access the application:**
     Once the containers are running, you can access the demo in your web browser at `http://localhost:[PORT]`. (e.g., `http://localhost:7860`).
+
+# Bangla API Surface
+
+The Flask backend now exposes Bangla-oriented endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/start-interview` | POST | Create a Bangla interview session (`patient_id`, `patient_data`) and return the opening MedGemma question plus optional audio. |
+| `/api/send-message` | POST | Submit the assistant’s follow-up prompt, receive the Bangla reply, audio, and completion flag. |
+| `/api/generate-report` | POST | Retrieve the Bangla pre-visit report and full transcript for a session. |
+| `/api/get-transcript` | POST | Fetch only the transcript for the session. |
+| `/api/cache-stats` | GET | Inspect persistent cache usage (text/audio hit rate, sizes). |
+| `/api/download-cache` | GET | Download a zip snapshot of the cache directory. |
+
+Frontend callers should update their request flow to these routes. Static assets can still be served from `frontend/build`; ensure any patient selector or mock data aligns with the Bangla personas defined in `medgemma/gemini.py`.
+
+## Regression Checks
+
+Basic smoke tests for the Bangla integration:
+
+1. **Interview loop**  
+   ```bash
+   curl -X POST http://localhost:7860/api/start-interview \
+     -H "Content-Type: application/json" \
+     -d '{"patient_id":"demo_bn","patient_data":{"name":"রহিম উদ্দিন","age":45,"gender":"পুরুষ"}}'
+   ```
+   Note the Bangla greeting and optional `audio` field.
+
+2. **Caching behaviour**  
+   Repeat the same message via `/api/send-message` twice and check `/api/cache-stats`; the `hits` counter should increase on the second call.
+
+3. **TTS toggle**  
+   - With `GENERATE_SPEECH=true`, verify `audio` fields are present and non-empty.  
+   - Switch to `GENERATE_SPEECH=false`, restart the app, and confirm new calls omit audio while previously cached clips still play.
+
+4. **Report generation**  
+   Drive the conversation to completion and POST to `/api/generate-report` to ensure the Bangla summary and transcript are produced without errors.
 
 # Models used
 This demo uses four models:
