@@ -1,12 +1,25 @@
 from typing import Dict
 
+# Load environment from .env before importing modules that read env vars
+import os
+from pathlib import Path
+try:
+    from dotenv import load_dotenv  # type: ignore
+    # Try local .env first, then repo root .env
+    here = Path(__file__).resolve().parent
+    for env_path in (here / ".env", here.parent / ".env"):
+        if env_path.is_file():
+            load_dotenv(dotenv_path=str(env_path), override=False)
+            break
+except Exception:
+    pass
+
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 
 from cache import PersistentCache, create_cache_zip
 from interview_simulator import InterviewSimulator
 
-import os
 import json
 
 
