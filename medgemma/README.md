@@ -115,6 +115,19 @@ To run this demo on your own machine, you'll need to have Docker installed.
     * `GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY`: JSON service-account credentials with access to the endpoint.
     * `GENERATE_SPEECH`: Set to `true` to enable Gemini TTS generation (defaults to `false` if omitted). When `false`, cached audio is served if present and new clips are skipped.
 
+3.  **Local (HF) backend (optional, Vertex-free):**
+    To run MedGemma locally using Hugging Face instead of Vertex AI, set the following environment variables:
+    ```ini
+    MEDGEMMA_BACKEND=local          # switch backend to Hugging Face
+    MEDGEMMA_MODEL_ID=google/medgemma-4b-it   # dev-friendly size; 27B needs large GPUs
+    MEDGEMMA_DEVICE_MAP=auto        # pass to from_pretrained device mapping
+    MEDGEMMA_DTYPE=bfloat16         # or float16; quantized int4 if applicable
+    GENERATE_SPEECH=false           # keep fully local by disabling new TTS
+    ```
+    - Install deps: `pip install --upgrade transformers>=4.50.0 accelerate` and a CUDA-enabled PyTorch build per your system.
+    - If the model is gated, run `huggingface-cli login` (with an account that has access). Do not store HF tokens in `.env`.
+    - Optional fallback: set `MEDGEMMA_FALLBACK=vertex` to route to Vertex AI if local model load/generation fails.
+
 ### Execution
 1.  **Build and run the Docker containers:**
     ```bash
@@ -123,6 +136,75 @@ To run this demo on your own machine, you'll need to have Docker installed.
 
 2.  **Access the application:**
     Once the containers are running, you can access the demo in your web browser at `http://localhost:[PORT]`. (e.g., `http://localhost:7860`).
+
+# Local (HF) Run (Vertex‑free)
+
+Run MedGemma locally using Hugging Face instead of Vertex AI.
+
+1.  Prerequisites
+    - NVIDIA GPU recommended. Typical VRAM guidance:
+      - `google/medgemma-4b-it`: ~20–24 GB for full precision; can be lower with offload/quantization.
+      - `google/medgemma-27b-text-it`: ≥80 GB recommended; heavy quantization or multi‑GPU sharding otherwise.
+    - Python deps: `pip install --upgrade transformers>=4.50.0 accelerate` and a CUDA‑enabled PyTorch (see pytorch.org for install matching your CUDA).
+    - Optional quantization: `bitsandbytes` for 4‑bit. Note: the provided code path does not enable 4‑bit by default; enabling requires passing `load_in_4bit=True` and related kwargs to the HF loader.
+    - If the model is gated, run `huggingface-cli login` with an account that has access.
+
+2.  Environment configuration (local backend)
+    Add these to your shell or `.env`/`env.list` files.
+
+    Example `.env`:
+    ```ini
+    MEDGEMMA_BACKEND=local
+    MEDGEMMA_MODEL_ID=google/medgemma-4b-it
+    MEDGEMMA_DEVICE_MAP=auto
+    MEDGEMMA_DTYPE=bfloat16
+    GENERATE_SPEECH=false
+    CACHE_DIR=cache_bangla
+    ```
+
+    Example `env.list` (Docker):
+    ```ini
+    MEDGEMMA_BACKEND=local
+    MEDGEMMA_MODEL_ID=google/medgemma-4b-it
+    MEDGEMMA_DEVICE_MAP=auto
+    MEDGEMMA_DTYPE=bfloat16
+    GENERATE_SPEECH=false
+    CACHE_DIR=cache_bangla
+    ```
+
+3.  Start the server
+    ```bash
+    cd medgemma
+    python app.py
+    ```
+
+4.  Smoke tests (curl)
+    - Start interview
+      ```bash
+      curl -s -X POST http://localhost:7860/api/start-interview \
+        -H "Content-Type: application/json" \
+        -d '{"patient_id":"bn_001","patient_data":{"name":"রহিম উদ্দিন","age":45,"gender":"পুরুষ"}}' | jq
+      ```
+    - Send message
+      ```bash
+      curl -s -X POST http://localhost:7860/api/send-message \
+        -H "Content-Type: application/json" \
+        -d '{"patient_id":"bn_001","message":"আমার বুকে ব্যথা হচ্ছে"}' | jq
+      ```
+    - Generate report
+      ```bash
+      curl -s -X POST http://localhost:7860/api/generate-report \
+        -H "Content-Type: application/json" \
+        -d '{"patient_id":"bn_001"}' | jq
+      ```
+    - Cache stats
+      ```bash
+      curl -s http://localhost:7860/api/cache-stats | jq
+      ```
+
+Tips:
+- Keep `GENERATE_SPEECH=false` for a fully local run (Gemini TTS requires network). Cached audio still plays if present.
+- For 27B models, expect long load/generation times; consider quantization or Vertex AI for production.
 
 # Bangla API Surface
 

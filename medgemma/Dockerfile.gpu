@@ -1,0 +1,59 @@
+# GPU-enabled image for local (HF) backend
+# Builds frontend and runs Python backend with CUDA-enabled PyTorch
+
+# ---------- Stage 1: Build React frontend ----------
+FROM node:24-slim AS frontend-build
+WORKDIR /app/frontend
+RUN npm install -g npm@11.4.x
+COPY frontend/ ./
+RUN npm install && npm run build
+
+# ---------- Stage 2: Python + CUDA runtime ----------
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+# System deps (python, pip, ffmpeg for media handling)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+    ffmpeg git unzip ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python deps
+COPY requirements.txt ./requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Install HF + Accelerate (Torch not pinned here; install from CUDA index)
+RUN pip3 install --no-cache-dir --upgrade \
+    transformers>=4.50.0 accelerate
+
+# Install CUDA-enabled PyTorch (override via build-arg if needed)
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+RUN pip3 install --no-cache-dir --extra-index-url ${TORCH_INDEX_URL} torch torchvision torchaudio || true
+
+# Optional: bitsandbytes for 4-bit (best-effort)
+RUN pip3 install --no-cache-dir bitsandbytes || true
+
+# Copy backend sources
+COPY *.py ./
+COPY symptoms.json ./
+COPY report_template.txt ./
+
+# Copy built frontend
+COPY --from=frontend-build /app/frontend/build ./frontend/build
+ENV FRONTEND_BUILD=/app/frontend/build
+
+# Cache directory
+RUN mkdir -p /cache && chmod 777 /cache
+ENV CACHE_DIR=/cache
+
+# Default to local backend with TTS off (override via env-file as needed)
+ENV MEDGEMMA_BACKEND=local \
+    GENERATE_SPEECH=false
+
+EXPOSE 7860
+CMD ["gunicorn", "-b", "0.0.0.0:7860", "app:app", "--threads", "4", "--timeout", "300"]
+

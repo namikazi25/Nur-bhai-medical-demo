@@ -19,6 +19,11 @@ pydub==0.25.1
 pydantic==2.5.0
 ujson==5.9.0
 
+# Local HF backend (no torch pinned; install per PyTorch site)
+transformers>=4.50.0
+accelerate
+# bitsandbytes  # optional for 4-bit quantization; install only if supported
+
 # Optional but recommended
 certifi==2023.11.17
 charset-normalizer==3.3.2

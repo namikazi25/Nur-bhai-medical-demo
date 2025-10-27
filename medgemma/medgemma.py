@@ -21,6 +21,24 @@ from google.oauth2 import service_account
 
 from cache import PersistentCache, cache as default_cache
 
+# Optional HF local backend
+try:
+    from transformers import AutoProcessor, AutoModelForImageTextToText
+    _TRANSFORMERS_AVAILABLE = True
+except Exception:
+    _TRANSFORMERS_AVAILABLE = False
+try:
+    import torch
+except Exception:
+    torch = None  # type: ignore
+
+# Backend selection
+BACKEND = os.environ.get("MEDGEMMA_BACKEND", "vertex").lower()
+FALLBACK = os.environ.get("MEDGEMMA_FALLBACK", "").lower()
+HF_MODEL_ID = os.environ.get("MEDGEMMA_MODEL_ID", "google/medgemma-4b-it")
+HF_DEVICE_MAP = os.environ.get("MEDGEMMA_DEVICE_MAP", "auto")
+HF_DTYPE = os.environ.get("MEDGEMMA_DTYPE", "bfloat16")
+
 GCP_PROJECT = os.environ.get("GCP_PROJECT")
 GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 GCP_MEDGEMMA_ENDPOINT = os.environ.get("GCP_MEDGEMMA_ENDPOINT")
@@ -28,6 +46,8 @@ GCP_SERVICE_ACCOUNT_KEY = os.environ.get("GCP_MEDGEMMA_SERVICE_ACCOUNT_KEY")
 
 _vertex_initialized = False
 _vertex_credentials: Optional[service_account.Credentials] = None
+_hf_model = None
+_hf_processor = None
 
 
 def _initialize_vertex_ai() -> None:
@@ -110,8 +130,16 @@ def generate_medgemma_response(
     """
 
     cache = cache or default_cache
-    if not GCP_MEDGEMMA_ENDPOINT:
-        return "MedGemma endpoint is not configured. অনুগ্রহ করে GCP_MEDGEMMA_ENDPOINT সেট করুন।"
+    # Local HF backend path
+    if BACKEND == "local":
+        text = _generate_with_hf(prompt, conversation_history, system_prompts or [], temperature, max_tokens)
+        if text:
+            return text
+        # If HF failed, optionally fall back to Vertex based on env knob
+        if FALLBACK != "vertex":
+            return "স্থানীয় মডেল লোড করা যায়নি। MEDGEMMA_FALLBACK=vertex সেট করলে Vertex AI ব্যবহৃত হবে।"
+        if not GCP_MEDGEMMA_ENDPOINT:
+            return "স্থানীয় মডেল লোড করা যায়নি এবং MedGemma endpoint কনফিগার নেই।"
 
     serialized_context = {
         "prompt": prompt,
@@ -128,6 +156,9 @@ def generate_medgemma_response(
     if cached_response:
         return cached_response
 
+    # Vertex backend path
+    if not GCP_MEDGEMMA_ENDPOINT:
+        return "MedGemma endpoint is not configured. অনুগ্রহ করে GCP_MEDGEMMA_ENDPOINT সেট করুন।"
     _initialize_vertex_ai()
     try:
         endpoint = aiplatform.Endpoint(GCP_MEDGEMMA_ENDPOINT)
@@ -152,6 +183,115 @@ def generate_medgemma_response(
         print(f"MedGemma API error: {exc}")
 
     return "দুঃখিত, একটি ত্রুটি ঘটেছে। অনুগ্রহ করে আবার চেষ্টা করুন।"
+
+
+def _hf_resolve_dtype():
+    if torch is None:
+        return None
+    mapping = {
+        "bfloat16": getattr(torch, "bfloat16", None),
+        "float16": getattr(torch, "float16", None),
+        "float32": getattr(torch, "float32", None),
+    }
+    return mapping.get(HF_DTYPE.lower())
+
+
+def _initialize_hf_local():
+    global _hf_model, _hf_processor
+    if _hf_model is not None and _hf_processor is not None:
+        return True
+    if not _TRANSFORMERS_AVAILABLE:
+        return False
+    try:
+        dtype = _hf_resolve_dtype()
+        _hf_model = AutoModelForImageTextToText.from_pretrained(
+            HF_MODEL_ID,
+            torch_dtype=dtype,
+            device_map=HF_DEVICE_MAP,
+        )
+        _hf_processor = AutoProcessor.from_pretrained(HF_MODEL_ID)
+        return True
+    except Exception as exc:
+        print(f"HF model load failed: {exc}")
+        _hf_model = None
+        _hf_processor = None
+        return False
+
+
+def _build_hf_messages(
+    prompt: str,
+    conversation_history: List[Dict[str, str]],
+    system_prompts: List[str],
+) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    # Base Bangla system prompt
+    messages.append({"role": "system", "content": [{"type": "text", "text": _build_bangla_system_prompt()}]})
+    for extra in system_prompts:
+        messages.append({"role": "system", "content": [{"type": "text", "text": extra}]})
+    for msg in conversation_history:
+        messages.append({
+            "role": msg["role"],
+            "content": [{"type": "text", "text": msg["content"]}],
+        })
+    if prompt:
+        messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    return messages
+
+
+def _generate_with_hf(
+    prompt: str,
+    conversation_history: List[Dict[str, str]],
+    system_prompts: List[str],
+    temperature: float,
+    max_tokens: int,
+) -> Optional[str]:
+    # Use cached response first (shared cache keying)
+    conv_context = json.dumps(
+        {"prompt": prompt, "history": conversation_history, "system_prompts": system_prompts}, ensure_ascii=False
+    )
+    cached = default_cache.get(prompt, context=conv_context)
+    if cached:
+        return cached
+
+    if not _initialize_hf_local():
+        return None
+    try:
+        messages_hf = _build_hf_messages(prompt, conversation_history, system_prompts)
+        inputs = _hf_processor.apply_chat_template(
+            messages_hf,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        if torch is not None:
+            inputs = inputs.to(_hf_model.device, dtype=getattr(torch, HF_DTYPE, None))
+            input_len = inputs["input_ids"].shape[-1]
+            do_sample = temperature is not None and temperature > 0.0
+            with torch.inference_mode():
+                generation = _hf_model.generate(
+                    **inputs,
+                    max_new_tokens=max_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                )
+                generation = generation[0][input_len:]
+            decoded = _hf_processor.decode(generation, skip_special_tokens=True)
+        else:
+            # Fallback: attempt CPU run without dtype/acceleration
+            input_len = inputs["input_ids"].shape[-1]
+            generation = _hf_model.generate(**inputs, max_new_tokens=max_tokens)
+            generation = generation[0][input_len:]
+            decoded = _hf_processor.decode(generation, skip_special_tokens=True)
+
+        text = (decoded or "").strip()
+        if text:
+            default_cache.set(prompt, text, context=conv_context)
+            return text
+        return None
+    except Exception as exc:
+        print(f"HF generation failed: {exc}")
+        return None
 
 
 def generate_medical_summary(
