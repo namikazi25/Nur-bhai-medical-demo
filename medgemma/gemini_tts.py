@@ -73,15 +73,13 @@ def _ensure_audio_payload(
         model = genai.GenerativeModel(GEMINI_TTS_MODEL)
         response = model.generate_content(
             clean_text,
-            generation_config=genai.GenerationConfig(
-                response_modalities=["AUDIO"],
-                speech_config={
-                    "voice_config": {
-                        "prebuilt_voice_config": {"voice_name": voice},
-                    },
-                    "language_code": GEMINI_TTS_LANGUAGE,
+            response_modalities=["AUDIO"],
+            speech_config={
+                "voice_config": {
+                    "prebuilt_voice_config": {"voice_name": voice},
                 },
-            ),
+                "language_code": GEMINI_TTS_LANGUAGE,
+            },
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         print(f"TTS generation error: {exc}")
@@ -147,4 +145,3 @@ def synthesize_gemini_tts(
 
     audio_bytes = base64.b64decode(audio_base64.encode("utf-8"))
     return audio_bytes, mime_type or "audio/mpeg"
-

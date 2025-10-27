@@ -188,12 +188,24 @@ def generate_medgemma_response(
 def _hf_resolve_dtype():
     if torch is None:
         return None
+    requested = HF_DTYPE.lower()
     mapping = {
         "bfloat16": getattr(torch, "bfloat16", None),
         "float16": getattr(torch, "float16", None),
         "float32": getattr(torch, "float32", None),
     }
-    return mapping.get(HF_DTYPE.lower())
+    dtype = mapping.get(requested)
+
+    if dtype is torch.bfloat16 and torch.cuda.is_available():
+        # Older GPUs (e.g., T4 with compute capability < 8.0) do not support bfloat16 well.
+        try:
+            major = torch.cuda.get_device_properties(0).major
+            if major < 8:
+                return mapping.get("float16")
+        except Exception:
+            return mapping.get("float16")
+
+    return dtype
 
 
 def _initialize_hf_local():
