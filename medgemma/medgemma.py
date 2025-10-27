@@ -224,17 +224,33 @@ def _build_hf_messages(
     system_prompts: List[str],
 ) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
-    # Base Bangla system prompt
+
     messages.append({"role": "system", "content": [{"type": "text", "text": _build_bangla_system_prompt()}]})
+
     for extra in system_prompts:
         messages.append({"role": "system", "content": [{"type": "text", "text": extra}]})
+
+    history_lines: List[str] = []
     for msg in conversation_history:
+        speaker = "সহায়ক" if msg.get("role") == "assistant" else "রোগী"
+        history_lines.append(f"{speaker}: {msg.get('content', '')}")
+
+    combined_prompt = prompt or ""
+    if history_lines:
+        history_text = "\n".join(history_lines)
+        if combined_prompt:
+            combined_prompt = (
+                f"পূর্ববর্তী কথোপকথন:\n{history_text}\n\nবর্তমান নির্দেশ:\n{combined_prompt}"
+            )
+        else:
+            combined_prompt = f"পূর্ববর্তী কথোপকথন:\n{history_text}"
+
+    if combined_prompt:
         messages.append({
-            "role": msg["role"],
-            "content": [{"type": "text", "text": msg["content"]}],
+            "role": "user",
+            "content": [{"type": "text", "text": combined_prompt}],
         })
-    if prompt:
-        messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+
     return messages
 
 
